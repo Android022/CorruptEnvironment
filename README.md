@@ -1,0 +1,1 @@
+Here you can find the code and data replication files for my essay on corruption and COP delegate size for the Contemporary International System research project. My code is in the file 'analysis.qmd'; the two data files are 'data_2009.csv' and 'data_2015.csv'. The data files that were used as sources are also available. See references in my research paper.
