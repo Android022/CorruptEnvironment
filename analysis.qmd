@@ -1,0 +1,364 @@
+---
+title: "IR Environment Corruption Analysis"
+format: html
+editor: visual
+---
+
+Clean and merge corruption datasets:
+
+```{r}
+# import libraries
+corrupt1_control <- read.csv("control_of_corruption.csv")
+corrupt2_perception <- read.csv("corruption_perception.csv")
+corrupt3_parking <- read.csv("unpaid_parking_violations_per_diplomat.csv")
+cop_attendance <- read.csv("conference_attendance.csv")
+
+
+# Clean 1
+colnames(corrupt1_control)[5:ncol(corrupt1_control)] <- as.character(1996:2022)
+corrupt1_control <- corrupt1_control[, -3]
+colnames(corrupt1_control)[1:2] <- c("country_name", "country_code")
+
+library(tidyr)
+
+corrupt1_control <- pivot_longer(corrupt1_control, 
+                                      cols = -c(country_name, country_code),
+                                      names_to = "year",
+                                      values_to = "value")
+
+colnames(corrupt1_control)[4] <- c("corrupt_control")
+corrupt1_control <- corrupt1_control[-1, ]
+
+
+# Clean 2
+colnames(corrupt2_perception)[1:4] <- c("country_name", "country_code", "year", "corrupt_perception")
+
+# Clean 3
+corrupt3_parking <- corrupt3_parking[, -3]
+colnames(corrupt3_parking)[1:3] <- c("country_name", "country_code",  "corrupt_parking")
+
+# merging
+corrupt_merged <- merge(corrupt1_control, corrupt2_perception, by = c("country_name", "country_code", "year"), all = TRUE)
+
+
+corrupt_merged <- merge(corrupt_merged, corrupt3_parking, by = "country_code", all.x = TRUE)
+
+corrupt_merged <- corrupt_merged[-(1:125), ]
+corrupt_merged <- subset(corrupt_merged, year != "Series.Code")
+corrupt_merged <- corrupt_merged[, -6]
+colnames(corrupt_merged)[2] <- c("country_name")
+corrupt_merged$corrupt_control[corrupt_merged$corrupt_control == ".."] <- NA
+
+write.csv(corrupt_merged, "corrupt_merged.csv", row.names = FALSE)
+
+
+```
+
+Clean attendance dataset and merge with corruption dataset:
+
+```{r}
+corrupt <- read.csv("corrupt_merged.csv")
+
+attendance <- read.csv("conference_attendance.csv")
+
+colnames(attendance)
+
+# Columns to remove
+columns_to_remove <- c(
+    "CountryCodeYear",
+    "LocationCCode",
+    "TotalC02Emis",
+    "CO2PerCap",
+    "Population",
+    "AOSISMembers",
+    "EU",
+    "TourNumArrivals",
+    "GDPpercap",
+    "DistanceCCodes",
+    "logCO2Tot",
+    "logtourarriv",
+    "ExecIdeology",
+    "NoExec",
+    "RightExec",
+    "LeftExec",
+    "biodiversity",
+    "GEFCouncil",
+    "TotalGDP",
+    "IO",
+    "logGDP",
+    "logBilaterialAidRecip",
+    "logBilaterialAidDonor",
+    "envcpia.2",
+    "HostDummy",
+    "Annex1Dummy",
+    "CDMDonorNum",
+    "CDMHostNum",
+    "GEFFunds",
+    "GEFFundsDummy",
+    "Annex1Host",
+    "NatDiaster",
+    "GEFDon"
+)
+
+# Remove specified columns
+attendance <- attendance[, !names(attendance) %in% columns_to_remove]
+
+rm(columns_to_remove)
+
+colnames(attendance)
+
+colnames(attendance) <- tolower(colnames(attendance))
+
+library(dplyr)
+
+attendance <- attendance %>%
+  rename(country_code = countrycode,
+         delegates = delegates0)
+
+# merging
+
+data <- merge(attendance, corrupt[, c("country_code", "year", "corrupt_control", "corrupt_perception", "corrupt_parking")], 
+              by = c("country_code", "year"), all.x = TRUE)
+
+write.csv(data, "data.csv", row.names = FALSE)
+
+
+```
+
+Add fossil fuel use, subset for democracy and 2009/2015
+
+```{r}
+data <- read.csv("data.csv")
+
+# Merge with fossil fuel use
+fossil_fuel_use <- read.csv("fossil_fuel_use.csv")
+
+colnames(fossil_fuel_use) <- c("country_name", "country_code", "year", "fossil_fuel_use")
+
+fossil_fuel_use$log_fossil_fuel_use <- log(fossil_fuel_use$fossil_fuel_use) 
+
+library(dplyr)
+
+fossil_fuel_use <- fossil_fuel_use[, -1]
+
+data <- merge(data, fossil_fuel_use, by = c("country_code", "year"), all.x = TRUE)
+
+rm(fossil_fuel_use)
+
+
+# recode democracy
+data$dem_dummy <- ifelse(data$polity2 > 5, 1, 0)
+
+# subset to democracies in 2019 and 2015
+data_2009 <- subset(data, year == 2009 & dem_dummy == 1)
+data_2015 <- subset(data, year == 2015 & dem_dummy == 1)
+
+write.csv(data_2009, "data_2009.csv", row.names = FALSE)
+write.csv(data_2015, "data_2015.csv", row.names = FALSE)
+
+
+```
+
+Extra: Replicating paper's regression
+
+```{r}
+data <- read.csv("data.csv")
+
+log_conditional <- function(x) {
+  ifelse(x > 0, log(x), 0)
+}
+
+# Apply the conditional log transformation to selected columns
+data$log_delegates <- log_conditional(data$delegates)
+data$log_envdonor <- log_conditional(data$envdonor)
+data$log_envrecipient <- log_conditional(data$envrecipient)
+
+rm(log_conditional)
+
+data_c2 <- subset(data, !is.na(corrupt_perception))
+
+
+# note to self. I think there are two big things wrong with this regression analysis? One is the sheer number of variables - surely you could get the same explanatory power out of only a handful of the variables. Also is it effectively a time series but without fixed effects? And I think I'll add an interaction between democracy and corruption
+
+m1 <- lm(log_delegates ~ loggdppercap + logpop + polity2 + regqual + g20 + unsc + wbeb + distance + loggefdon + envtreaty + log_envrecipient + cdmdonor + cdmhost + logco2percap + opecdummy + logbiodiversity + foodprod + lognatdiaster + envcpia + envministry, data = data)
+
+regression_output <- stargazer::stargazer(
+  m1,
+  title = "Regression Results",
+  type = "html", 
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  dep.var.caption = c("Delegation size (log)"),
+  dep.var.labels = c("Kaya & Schofield 2020", "+ corruption"),
+  covariate.labels = c(
+  "Log GDP per capita",
+  "Log population",
+  "Polity 2",
+  "Regulatory quality",
+  "G20",
+  "UNSC",
+  "WBEB",
+  "Distance",
+  "Loggefdon",
+  "Environment treaty",
+  "Log environemnt recipient",
+  "Cdmdonor",
+  "Cdmhost",
+  "Log co2 per capita",
+  "OPEC",
+  "Log biodiversity",
+  "Food prod",
+  "Log natural disaster",
+  "envcpia",
+  "envministry"))
+```
+
+Extra: Correlation and scatter plot between different markers of corruption
+
+```{r}
+# compare the three markers of democracy?
+cor(data$corrupt_control, data$corrupt_perception, use = "pairwise.complete.obs")
+
+library(ggplot2)
+
+ggplot(data, aes(x = corrupt_control, y = corrupt_perception)) +
+  geom_point() +  # Add scatter plot
+  geom_smooth(method = "lm", se = FALSE) +  # Add line of best fit
+  labs(x = "World Bank: Control of corruption", y = "Transparency International: Corrupt Perception", title = "Correlation of corruption measures") +
+  theme_minimal()  # Remove background and gridlines
+
+
+data_2002 <- data[data$year == 2002, ]
+
+data_2002$log_corrupt_parking <- ifelse(data_2002$corrupt_parking != 0, log(data_2002$corrupt_parking), 0)
+
+data_2002 <- data_2002[data_2002$log_corrupt_parking >= 0, ]
+
+
+
+cor(data_2002$corrupt_control, data_2002$log_corrupt_parking, use = "pairwise.complete.obs")
+
+ggplot(data_2002, aes(x = corrupt_control, y = log_corrupt_parking)) +
+  geom_point() +  # Add scatter plot
+  geom_smooth(method = "lm", se = FALSE) +  # Add line of best fit
+  labs(x = "World Bank: Control of corruption", y = "Fisman & Miguel 2007: Diplomatic parking tickets", title = "Correlation of corruption measures") +
+  theme_minimal()  # Remove background and gridlines
+
+cor(data$corrupt_perception, data$corrupt_parking, use = "pairwise.complete.obs")
+
+```
+
+Regression analyses
+
+```{r}
+
+# import datasets and libraries
+data_2009 <- read.csv("data_2009.csv")
+data_2015 <- read.csv("data_2015.csv")
+
+library(ggplot2)
+library(gridExtra)
+
+
+# log the appropriate variables
+data_2009$log_delegates <- log(data_2009$delegates)
+data_2015$log_delegates <- log(data_2015$delegates)
+
+data_2009$log_distance <- log(data_2009$distance)
+data_2015$log_distance <- log(data_2015$distance)
+
+
+
+# plotting graphs
+plot1 <- ggplot(data_2009, aes(x = corrupt_control, y = log_delegates)) +
+  geom_point() +  # Add scatter plot
+  geom_smooth(method = "lm", se = FALSE) +  # Add line of best fit
+  labs(x = "Corruption (World Bank)", y = "Log Delegate Size", title = "COP 2009 (Copenhagen)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_cartesian(ylim = c(2, 6))
+
+plot2 <- ggplot(data_2015, aes(x = corrupt_control, y = log_delegates)) +
+  geom_point() +  # Add scatter plot
+  geom_smooth(method = "lm", se = FALSE) +  # Add line of best fit
+  labs(x = "Corruption (World Bank)", y = NULL, title = "COP 2015 (Paris)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_cartesian(ylim = c(2, 6))
+
+plot3 <- ggplot(data_2015, aes(x = corrupt_perception, y = log_delegates)) +
+  geom_point() +  # Add scatter plot
+  geom_smooth(method = "lm", se = FALSE) +  # Add line of best fit
+  labs(x = "Corruption (Transparency Int.)", y = NULL, title = "COP 2015 (Paris)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_cartesian(ylim = c(2, 6))
+
+
+ggsave("corruption_scatter.png", grid.arrange(plot1, plot2, plot3, ncol = 3), width = 10, height = 5, units = "in")
+
+rm(plot1, plot2, plot3)
+
+
+# regression 1
+library(stargazer)
+
+data_2009$log_distance
+data_2009$logpop
+data_2009$logco2percap
+data_2009$loggdppercap
+data_2009$log_delegates
+data_2009$corrupt_control
+data_2009$corrupt_perception
+data_2009$log_fossil_fuel_use
+
+m1_2009 <- lm(log_delegates ~ corrupt_control + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use, data = data_2009)
+
+m1_2015 <- lm(log_delegates ~ corrupt_control + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use, data = data_2015)
+
+m1_2015_b <- lm(log_delegates ~ corrupt_perception + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use, data = data_2015)
+
+
+regression_output <- stargazer::stargazer(
+  m1_2009, m1_2015, m1_2015_b,
+  title = "Regression Results",
+  type = "text", 
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  dep.var.caption = c("Delegation size (log)"),
+  column.labels = c("2009", "2015", "2015"),
+  covariate.labels = c(
+  "Corruption (World Bank)",
+  "Corruption (Transparency International)",
+  "Distance (log)",
+  "Population (log)",
+  "CO2 per capita (log)",
+  "GDP per capita (log)",
+  "Fossil fuel use (log)"))
+
+print(regression_output)
+
+# regression 2
+m2_2009 <- lm(log_delegates ~ corrupt_control + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use + corrupt_control * log_fossil_fuel_use, data = data_2009)
+
+m2_2015 <- lm(log_delegates ~ corrupt_control + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use + corrupt_control * log_fossil_fuel_use, data = data_2015)
+
+m2_2015_b <- lm(log_delegates ~ corrupt_perception + log_distance + logpop + logco2percap + loggdppercap + log_fossil_fuel_use + corrupt_perception * log_fossil_fuel_use, data = data_2015)
+
+
+regression_output <- stargazer::stargazer(
+  m2_2009, m2_2015, m2_2015_b,
+  title = "Regression Results",
+  type = "text", 
+  star.cutoffs = c(0.05, 0.01, 0.001),
+  dep.var.caption = c("Delegation size (log)"),
+  column.labels = c("2009", "2015", "2015"),
+  covariate.labels = c(
+  "Corruption (World Bank)",
+  "Corruption (Transparency International)",
+  "Distance (log)",
+  "Population (log)",
+  "CO2 per capita (log)",
+  "GDP per capita (log)",
+  "Fossil fuel use (log)",
+  "Corruption (World Bank) * Fossil fuel use (log)",
+  "Corruption (Transparency Int.) * Fossil fuel use (log)"))
+```
